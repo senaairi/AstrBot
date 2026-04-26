@@ -1,10 +1,11 @@
 import base64
-import binascii
 import hashlib
+import hmac
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
-from quart import Quart, g, jsonify, request
+
+from quart import request
 
 
 class InvalidSignatureError(Exception):
@@ -28,26 +29,32 @@ def de_package(apikey: str, data: str, noise: str, expiry_date: str, signature: 
         raise InvalidSignatureError("expiry_date is expired")
 
     payload = f"{data}{noise}{expiry_date}{apikey}"
-    computed = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    #computed = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    computed = hmac.new(apikey.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    if computed != signature:
+    if not hmac.compare_digest(computed, signature):
         raise InvalidSignatureError("signature error")
 
-    # 5. 解码数据
-    decoded_bytes = base64.b64decode(data)
-    decoded_str = decoded_bytes.decode("utf-8")
-    result = json.loads(decoded_str)
+    try:
+        decoded_bytes = base64.b64decode(data)
+        decoded_str = decoded_bytes.decode("utf-8")
+        result = json.loads(decoded_str)
+    except Exception as e:
+        raise InvalidSignatureError(f"failed to decode data: {e}")
 
     return result
 
-
+# 漏掉了重要的内容：astrbot后端不存储明文apikey，所以在使用本函数前，你需要将apykey先进行编码
+# 示例：hashlib.pbkdf2_hmac( "sha256", {raw_key}.encode("utf-8"), b"astrbot_api_key", 100_000, ).hex()
 def en_package(appid: str, apikey: str, data: dict) -> dict:
     encode_data = base64.b64encode(
         json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     ).decode("utf-8")
     noise = secrets.token_urlsafe(32)
     expiry_date = (datetime.now().astimezone() + timedelta(days=1)).replace(microsecond=0).isoformat()
-    signature = hashlib.sha256(f"{encode_data}{noise}{expiry_date}{apikey}".encode("utf-8")).hexdigest()
+    #signature = hashlib.sha256(f"{encode_data}{noise}{expiry_date}{apikey}".encode()).hexdigest()
+    payload = f"{encode_data}{noise}{expiry_date}{apikey}"
+    signature = hmac.new(apikey.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
     return {
         "appid": appid,
@@ -55,7 +62,6 @@ def en_package(appid: str, apikey: str, data: dict) -> dict:
         "noise": noise,
         "expiry_date": expiry_date,
         "signature": signature,
-        "apikey": apikey,
     }
 
 
@@ -73,10 +79,10 @@ async def request_input(name: list) -> dict:
             if item in form_data:
                 return_data[item] = form_data[item]
                 continue
-        if request.args.get(item):
+        if item in request.args:
             return_data[item] = request.args.get(item)
             continue
-        if request.headers.get(item):
+        if item in request.headers:
             return_data[item] = request.headers.get(item)
             continue
     return return_data
