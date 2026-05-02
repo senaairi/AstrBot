@@ -15,6 +15,7 @@ let api_decode_data = ref({} as Record<string, any>);
 const attachmentEnabled = ref(true); // 是否明确开启文件功能
 const apiStatusError = ref(false);
 const apiErrorMsg = ref("");
+const welcomeTitle = ref("");
 
 onBeforeMount(() => {
   try {
@@ -38,6 +39,7 @@ onBeforeMount(() => {
     if (!api_decode_data.value?.config_id) throw new Error('args `config_id` is miss')
     if (!api_decode_data.value?.selected_provider) throw new Error('args `selected_provider` is miss')
     attachmentEnabled.value = api_decode_data.value?.file_upload === true;
+    welcomeTitle.value = route.query?.welcomeTitle as string ?? '';
   } catch (err) {
     apiErrorMsg.value = err instanceof Error ? err.message : String(err);
     apiStatusError.value = true;
@@ -64,6 +66,7 @@ onBeforeMount(() => {
     <div v-else class="msg-box">
       <div style="width: 100%; height: 100%;">
         <standalone-chat
+          :welcome-title="welcomeTitle"
           :config-id="api_decode_data.config_id"
           :widget-model="true"
           :api-package="api_package"

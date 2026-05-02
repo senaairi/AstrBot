@@ -1,5 +1,5 @@
 const ChatWidgetRoutes = {
-  path: "/chatwidget",
+  path: "/chatwidget/main",
   component: () => import("@/layouts/blank/BlankLayout.vue"),
   children: [
     {
@@ -7,6 +7,11 @@ const ChatWidgetRoutes = {
       path: "/chatwidget",
       component: () => import("@/views/ChatWidget.vue"),
     },
+    {
+      name: "MarkdownPrit",
+      path: "/markdownPrint",
+      component: () => import("@/views/print.vue"),
+    }
   ],
 };
 

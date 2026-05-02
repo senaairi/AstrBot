@@ -10,129 +10,17 @@
       </div>
 
       <div v-else class="message-list">
-        <div
-          v-for="(msg, msgIndex) in activeMessages"
-          :key="msg.id || `${msgIndex}-${msg.created_at || ''}`"
-          class="message-row"
-          :class="isUserMessage(msg) ? 'from-user' : 'from-bot'"
-        >
-          <div class="message-stack">
-            <div
-              class="message-bubble"
-              :class="{ user: isUserMessage(msg), bot: !isUserMessage(msg) }"
-            >
-              <div v-if="messageContent(msg).isLoading" class="loading-message">
-                {{ tm("message.loading") }}
-              </div>
-
-              <template v-else>
-                <template
-                  v-for="(block, blockIndex) in renderBlocks(msg)"
-                  :key="`${msgIndex}-block-${blockIndex}-${block.kind}`"
-                >
-                  <ReasoningBlock
-                    v-if="block.kind === 'thinking'"
-                    :parts="block.parts"
-                    :is-dark="isDark"
-                    :initial-expanded="false"
-                    :is-streaming="isMessageStreaming(msg, msgIndex)"
-                    :has-non-reasoning-content="
-                      hasFollowingContentBlock(msg, blockIndex)
-                    "
-                  />
-
-                  <template v-else>
-                    <template
-                      v-for="(part, partIndex) in block.parts"
-                      :key="`${msgIndex}-${blockIndex}-${partIndex}-${part.type}`"
-                    >
-                      <div
-                        v-if="part.type === 'plain' && isUserMessage(msg)"
-                        class="plain-content"
-                      >
-                        {{ part.text || "" }}
-                      </div>
-
-                      <MarkdownMessagePart
-                        v-else-if="part.type === 'plain'"
-                        :content="part.text || ''"
-                        :refs="messageRefs(msg)"
-                        :is-dark="isDark"
-                        :custom-html-tags="customMarkdownTags"
-                      />
-
-                      <button
-                        v-else-if="part.type === 'image'"
-                        class="image-part"
-                        type="button"
-                        @click="openImage(partUrl(part))"
-                      >
-                        <img :src="partUrl(part)" :alt="part.filename || 'image'" />
-                      </button>
-
-                      <audio
-                        v-else-if="part.type === 'record'"
-                        class="audio-part"
-                        controls
-                        :src="partUrl(part)"
-                      />
-
-                      <video
-                        v-else-if="part.type === 'video'"
-                        class="video-part"
-                        controls
-                        :src="partUrl(part)"
-                      />
-
-                      <div v-else-if="part.type === 'file'" class="file-part">
-                        <v-icon size="20">mdi-file-document-outline</v-icon>
-                        <span>{{ part.filename || "file" }}</span>
-                      </div>
-
-                      <div
-                        v-else-if="part.type === 'tool_call'"
-                        class="tool-call-block"
-                      >
-                        <template
-                          v-for="tool in part.tool_calls || []"
-                          :key="tool.id || tool.name"
-                        >
-                          <ToolCallItem
-                            v-if="isIPythonToolCall(tool)"
-                            :is-dark="isDark"
-                          >
-                            <template #label>
-                              <v-icon size="16">mdi-code-json</v-icon>
-                              <span>{{ tool.name || "python" }}</span>
-                              <span class="tool-call-inline-status">
-                                {{ toolCallStatusText(tool) }}
-                              </span>
-                            </template>
-                            <template #details>
-                              <IPythonToolBlock
-                                :tool-call="normalizeToolCall(tool)"
-                                :is-dark="isDark"
-                                :show-header="false"
-                                :force-expanded="true"
-                              />
-                            </template>
-                          </ToolCallItem>
-                          <ToolCallCard
-                            v-else
-                            :tool-call="normalizeToolCall(tool)"
-                            :is-dark="isDark"
-                          />
-                        </template>
-                      </div>
-
-                      <pre v-else class="unknown-part">{{ formatJson(part) }}</pre>
-                    </template>
-                  </template>
-                </template>
-              </template>
-            </div>
-          </div>
-        </div>
+        <ChatMessageList
+          :messages="activeMessages"
+          :is-dark="isDark"
+          :is-streaming="
+            Boolean(currSessionId && isSessionRunning(currSessionId))
+          "
+          :enable-edit="false"
+          :enable-regenerate="false"
+          :enable-copy="true"
+          :manage-refs-sidebar="false"
+        />
       </div>
     </section>
 
@@ -190,20 +78,12 @@ import axios from "axios";
 import { setCustomComponents } from "markstream-vue";
 import "markstream-vue/index.css";
 import ChatInput from "@/components/chat/ChatInput.vue";
-import IPythonToolBlock from "@/components/chat/message_list_comps/IPythonToolBlock.vue";
-import MarkdownMessagePart from "@/components/chat/message_list_comps/MarkdownMessagePart.vue";
-import ReasoningBlock from "@/components/chat/message_list_comps/ReasoningBlock.vue";
 import RefNode from "@/components/chat/message_list_comps/RefNode.vue";
-import ToolCallCard from "@/components/chat/message_list_comps/ToolCallCard.vue";
-import ToolCallItem from "@/components/chat/message_list_comps/ToolCallItem.vue";
 import ThemeAwareMarkdownCodeBlock from "@/components/shared/ThemeAwareMarkdownCodeBlock.vue";
 import { useMediaHandling } from "@/composables/useMediaHandling";
+import ChatMessageList from "@/components/chat/ChatMessageList.vue";
 import {
-  displayParts as displayMessageParts,
-  messageBlocks as buildMessageBlocks,
-  type MessageDisplayBlock,
   useMessages,
-  type ChatRecord,
   type MessagePart,
   type TransportMode,
 } from "@/composables/useMessages";
@@ -249,7 +129,6 @@ const inputRef = ref<InstanceType<typeof ChatInput> | null>(null);
 const imagePreview = reactive({ visible: false, url: "" });
 
 const isDark = computed(() => customizer.uiTheme === "PurpleThemeDark");
-const customMarkdownTags = ["ref"];
 
 if (props.widgetModel) {
   currSessionId.value = props.apiPackageData?.session_id ?? '';
@@ -275,9 +154,6 @@ const {
   sending,
   activeMessages,
   isSessionRunning,
-  isMessageStreaming,
-  isUserMessage,
-  messageContent,
   createLocalExchange,
   sendMessageStream,
   stopSession,
@@ -384,28 +260,6 @@ function buildOutgoingParts(text: string): MessagePart[] {
   return parts;
 }
 
-function hasNonReasoningContent(message: ChatRecord) {
-  return renderBlocks(message).some((block) => block.kind === "content");
-}
-
-function bubbleParts(message: ChatRecord) {
-  return displayMessageParts(messageContent(message));
-}
-
-function renderBlocks(message: ChatRecord): MessageDisplayBlock[] {
-  if (isUserMessage(message)) {
-    const parts = bubbleParts(message);
-    return parts.length ? [{ kind: "content", parts }] : [];
-  }
-  return buildMessageBlocks(messageContent(message));
-}
-
-function hasFollowingContentBlock(message: ChatRecord, blockIndex: number) {
-  return renderBlocks(message)
-    .slice(blockIndex + 1)
-    .some((block) => block.kind === "content");
-}
-
 async function stopCurrentSession() {
   if (!currSessionId.value) return;
   await stopSession(currSessionId.value);
@@ -429,82 +283,6 @@ function scrollToBottom() {
     container.scrollTop = container.scrollHeight;
     shouldStickToBottom.value = true;
   });
-}
-
-function messageRefs(message: ChatRecord) {
-  const refs = messageContent(message).refs;
-  if (refs && typeof refs === "object" && Array.isArray(refs.used)) {
-    return refs as { used?: Array<Record<string, unknown>> };
-  }
-  return null;
-}
-
-function partUrl(part: MessagePart) {
-  if (part.embedded_url) return part.embedded_url;
-  if (part.embedded_file?.url) return part.embedded_file.url;
-  if (part.attachment_id) {
-    if (props.widgetModel) {
-      const params = new URLSearchParams(props.apiPackage || {});
-      params.append('attachment_id', part.attachment_id);
-      return '/api/widget/file?' + params.toString();
-    }
-    return `/api/chat/get_attachment?attachment_id=${encodeURIComponent(
-      part.attachment_id,
-    )}`;
-  }
-  if (part.filename) {
-    if (props.widgetModel) {
-      const params = new URLSearchParams(props.apiPackage || {});
-      params.append('filename', part.filename);
-      return '/api/widget/filename?' + params.toString();
-    }
-    return `/api/chat/get_file?filename=${encodeURIComponent(part.filename)}`;
-  }
-  return "";
-}
-
-function normalizeToolCall(tool: Record<string, unknown>) {
-  const normalized = { ...tool };
-  normalized.args = parseJsonSafe(normalized.args || normalized.arguments);
-  normalized.result = parseJsonSafe(normalized.result);
-  if (!normalized.ts) normalized.ts = Date.now() / 1000;
-  if (normalized.result && typeof normalized.result === "object") {
-    normalized.result = JSON.stringify(normalized.result, null, 2);
-  }
-  return normalized;
-}
-
-function isIPythonToolCall(tool: Record<string, unknown>) {
-  const name = String(tool.name || "").toLowerCase();
-  return name.includes("python") || name.includes("ipython");
-}
-
-function toolCallStatusText(tool: Record<string, unknown>) {
-  if (tool.finished_ts) return tm("toolStatus.done");
-  return tm("toolStatus.running");
-}
-
-function formatJson(value: unknown) {
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value ?? "");
-  }
-}
-
-function parseJsonSafe(value: unknown) {
-  if (typeof value !== "string") return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
-function openImage(url: string) {
-  imagePreview.url = url;
-  imagePreview.visible = true;
 }
 
 function closeImage() {
@@ -549,58 +327,6 @@ function closeImage() {
   gap: 18px;
 }
 
-.message-row {
-  display: flex;
-}
-
-.message-row.from-user {
-  justify-content: flex-end;
-}
-
-.message-stack {
-  max-width: 88%;
-}
-
-.from-user .message-stack {
-  max-width: 70%;
-}
-
-.message-bubble {
-  border-radius: 8px;
-  padding: 10px 14px;
-  line-height: 1.65;
-  overflow-wrap: anywhere;
-}
-
-.message-bubble.user {
-  padding: 12px 18px;
-  border-radius: 1.5rem;
-  background: rgba(var(--v-theme-primary), 0.12);
-}
-
-.message-bubble.bot {
-  padding-left: 0;
-  background: transparent;
-}
-
-.plain-content {
-  white-space: pre-wrap;
-}
-
-.loading-message,
-.tool-call-inline-status {
-  color: var(--standalone-muted);
-}
-
-.image-part {
-  display: block;
-  border: 0;
-  padding: 0;
-  margin-top: 8px;
-  background: transparent;
-  cursor: zoom-in;
-}
-
 .image-part img {
   max-width: min(360px, 100%);
   max-height: 320px;
@@ -608,46 +334,10 @@ function closeImage() {
   object-fit: contain;
 }
 
-.audio-part,
-.video-part {
-  display: block;
-  max-width: 100%;
-  margin-top: 8px;
-}
-
-.video-part {
-  max-height: 320px;
-  border-radius: 8px;
-}
-
-.file-part {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.tool-call-block {
-  margin: 8px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
 .message-bubble.bot
   > .tool-call-block:first-child
   :deep(.tool-call-card:first-child) {
   margin-top: 0;
-}
-
-.unknown-part {
-  max-width: 100%;
-  overflow-x: auto;
-  border-radius: 8px;
-  padding: 10px;
-  background: rgba(var(--v-theme-on-surface), 0.06);
-  font-size: 13px;
-  line-height: 1.5;
 }
 
 .standalone-composer {
@@ -688,5 +378,10 @@ function closeImage() {
   max-height: 88vh;
   border-radius: 8px;
   object-fit: contain;
+}
+@media (max-width: 760px) {
+  .standalone-composer {
+    padding-bottom: 0;
+  }
 }
 </style>
