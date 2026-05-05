@@ -424,7 +424,7 @@ import type {
 } from "@/composables/useMessages";
 import { useI18n, useModuleI18n } from "@/i18n/composables";
 import { copyToClipboard } from "@/utils/clipboard";
-import {router} from "@/router";
+import { printMarkdown } from "@/utils/print";
 
 const props = withDefaults(
   defineProps<{
@@ -844,14 +844,7 @@ async function downloadMessage(message: ChatRecord) {
 async function printMessage(message: ChatRecord) {
   const text = plainTextFromMessage(message);
   if (!text) return;
-  const name = 'printContent.' + message.id;
-  localStorage.setItem(name, text)
-  window.open(router.resolve({
-    path: '/markdownPrint',
-    query: {
-      name: name,
-    }
-  }).href, '_blank');
+  printMarkdown(text);
 }
 
 async function downloadPart(part: MessagePart) {
