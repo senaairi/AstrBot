@@ -63,6 +63,33 @@ git clone 插件仓库地址
 short_desc: 一句话介绍你的插件。
 ```
 
+### 随插件提供 Skills（可选）
+
+插件可以在自己的目录下提供 `skills/` 文件夹。AstrBot 加载插件后会自动把其中合法的 Skill 纳入 Skill Manager，来源会显示为对应插件。
+
+推荐一个插件包含多个 Skill 时使用以下结构：
+
+```text
+your_plugin/
+  metadata.yaml
+  main.py
+  skills/
+    web-search-helper/
+      SKILL.md
+    report-writer/
+      SKILL.md
+```
+
+如果 `skills/` 本身就是一个 Skill，也可以直接放置：
+
+```text
+your_plugin/
+  skills/
+    SKILL.md
+```
+
+这种情况下 Skill 名称会使用插件目录名。插件提供的 Skill 由插件管理，在 WebUI 的 Skills 页面中作为只读来源展示；可以启用或禁用，但不能从本地 Skills 页面删除或编辑。插件卸载或更新后，对应 Skill 会随插件文件变化。
+
 ### 声明支持平台（Optional）
 
 你可以在 `metadata.yaml` 中新增 `support_platforms` 字段（`list[str]`），声明插件支持的平台适配器。WebUI 插件页会展示该字段。
@@ -77,8 +104,10 @@ support_platforms:
 
 - `aiocqhttp`
 - `qq_official`
+- `qq_official_webhook`
 - `telegram`
 - `wecom`
+- `wecom_ai_bot`
 - `lark`
 - `dingtalk`
 - `discord`
@@ -86,9 +115,12 @@ support_platforms:
 - `kook`
 - `vocechat`
 - `weixin_official_account`
+- `weixin_oc`
 - `satori`
 - `misskey`
 - `line`
+- `matrix`
+- `mattermost`
 
 ### 声明 AstrBot 版本范围（Optional）
 

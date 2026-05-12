@@ -14,6 +14,8 @@ from hypercorn.asyncio import serve
 from hypercorn.config import Config as HyperConfig
 from quart import Quart, g, jsonify, request
 from quart.logging import default_handler
+from werkzeug.exceptions import MethodNotAllowed, NotFound
+from werkzeug.routing import Map, Rule
 
 from astrbot.core import logger
 from astrbot.core.config.default import VERSION
@@ -24,8 +26,10 @@ from astrbot.core.utils.datetime_utils import to_utc_isoformat
 from astrbot.core.utils.io import get_local_ip_addresses
 
 from ..core.utils import api_package
+from .plugin_page_auth import PluginPageAuth
 from .routes import *
 from .routes.api_key import ALL_OPEN_API_SCOPES
+from .routes.auth import DASHBOARD_JWT_COOKIE_NAME
 from .routes.backup import BackupRoute
 from .routes.live_chat import LiveChatRoute
 from .routes.platform import PlatformRoute
@@ -44,6 +48,43 @@ class _AddrWithPort(Protocol):
 
 
 APP: Quart
+
+
+def _normalize_plugin_api_route(route: str) -> str:
+    route = route.strip()
+    if not route.startswith("/"):
+        route = f"/{route}"
+    return route
+
+
+def _match_registered_web_api(registered_web_apis, subpath: str, method: str):
+    request_path = f"/{subpath.lstrip('/')}"
+    request_method = method.upper()
+
+    for route, view_handler, methods, _ in registered_web_apis:
+        allowed_methods = [item.upper() for item in methods]
+        if request_method not in allowed_methods:
+            continue
+
+        url_map = Map(
+            [
+                Rule(
+                    _normalize_plugin_api_route(route),
+                    endpoint="plugin_api",
+                    methods=allowed_methods,
+                ),
+            ]
+        )
+        try:
+            _, path_values = url_map.bind("").match(
+                request_path,
+                method=request_method,
+            )
+        except (MethodNotAllowed, NotFound):
+            continue
+        return view_handler, path_values
+
+    return None
 
 
 def _parse_env_bool(value: str | None, default: bool) -> bool:
@@ -114,7 +155,7 @@ class AstrBotDashboard:
         self.cr = ConfigRoute(self.context, core_lifecycle)
         self.lr = LogRoute(self.context, core_lifecycle.log_broker)
         self.sfr = StaticFileRoute(self.context)
-        self.ar = AuthRoute(self.context)
+        self.ar = AuthRoute(self.context, db)
         self.api_key_route = ApiKeyRoute(self.context, db)
         self.chat_route = ChatRoute(self.context, db, core_lifecycle)
         self.open_api_route = OpenApiRoute(
@@ -162,10 +203,14 @@ class AstrBotDashboard:
     async def srv_plug_route(self, subpath, *args, **kwargs):
         """插件路由"""
         registered_web_apis = self.core_lifecycle.star_context.registered_web_apis
-        for api in registered_web_apis:
-            route, view_handler, methods, _ = api
-            if route == f"/{subpath}" and request.method in methods:
-                return await view_handler(*args, **kwargs)
+        matched_api = _match_registered_web_api(
+            registered_web_apis,
+            subpath,
+            request.method,
+        )
+        if matched_api:
+            view_handler, path_values = matched_api
+            return await view_handler(*args, **{**kwargs, **path_values})
         return jsonify(Response().error("未找到该路由").__dict__)
 
     async def auth_middleware(self):
@@ -205,78 +250,54 @@ class AstrBotDashboard:
             await self.db.touch_api_key(api_key.key_id)
             return None
 
-        # 验证签名、解包参数
         if request.path.startswith("/api/widget"):
             try:
-                post_data = await api_package.request_input([
-                    "appid",
-                    "data",
-                    "noise",
-                    "expiry_date",
-                    "signature",
-                ])
-                # 读取apikey
-                appid = post_data.get("appid")
-                if not appid:
-                    r = jsonify(Response().error("appid is empty").__dict__)
-                    r.status_code = 403
-                    return r
-                api_key = await self.db.get_api_key_by_id(str(appid))
-                if not api_key:
-                    r = jsonify(Response().error("Invalid API key").__dict__)
-                    r.status_code = 401
-                    return r
-                # 验证
-                pkg_data = api_package.de_package(
-                    api_key.key_hash,
-                    post_data.get("data", ""),
-                    post_data.get("noise", ""),
-                    post_data.get("expiry_date", ""),
-                    post_data.get("signature", ""),
-                )
-                if "username" not in pkg_data:
-                    r = jsonify(Response().error("username is required").__dict__)
-                    r.status_code = 401
-                    return r
-                username = "widget." + pkg_data["username"] # 增加前缀，
-                pkg_data["username"] = username
-                # 设置全局参数
-                g.username = username
-                g.api_package = pkg_data
-                # 权限
-                if isinstance(api_key.scopes, list):
-                    scopes = api_key.scopes
-                else:
-                    scopes = list(ALL_OPEN_API_SCOPES)
-                if "*" not in scopes and "chat_widget" not in scopes:
-                    r = jsonify(Response().error("Insufficient API key scope").__dict__)
-                    r.status_code = 403
-                    return r
-                return None
+                return await self._auth_middleware_widget()
             except Exception as err:
                 r = jsonify(Response().error(str(err)).__dict__)
                 r.status_code = 403
                 return r
 
-        allowed_endpoints = [
+        allowed_exact_endpoints = {
             "/api/auth/login",
+            "/api/auth/logout",
+            "/api/auth/setup-status",
+            "/api/auth/setup",
+        }
+        allowed_endpoint_prefixes = [
             "/api/file",
             "/api/platform/webhook",
             "/api/stat/start-time",
             "/api/backup/download",  # 备份下载使用 URL 参数传递 token
         ]
-        if any(request.path.startswith(prefix) for prefix in allowed_endpoints):
+        if request.path in allowed_exact_endpoints or any(
+            request.path.startswith(prefix) for prefix in allowed_endpoint_prefixes
+        ):
             return None
-        # 声明 JWT
-        token = request.headers.get("Authorization")
+        is_plugin_page_path = PluginPageAuth.is_protected_path(request.path)
+        token = self._extract_dashboard_jwt()
+        if not token and is_plugin_page_path:
+            token = PluginPageAuth.extract_asset_token()
         if not token:
             r = jsonify(Response().error("未授权").__dict__)
             r.status_code = 401
             return r
-        token = token.removeprefix("Bearer ")
         try:
             payload = jwt.decode(token, self._jwt_secret, algorithms=["HS256"])
-            g.username = payload["username"]
+            if PluginPageAuth.is_asset_token(
+                payload
+            ) and not PluginPageAuth.is_scope_valid(
+                payload,
+                request.path,
+            ):
+                r = jsonify(Response().error("Token 无效").__dict__)
+                r.status_code = 401
+                return r
+
+            username = payload.get("username")
+            if not isinstance(username, str) or not username.strip():
+                raise jwt.InvalidTokenError("missing username in token payload")
+            g.username = username
         except jwt.ExpiredSignatureError:
             r = jsonify(Response().error("Token 过期").__dict__)
             r.status_code = 401
@@ -285,6 +306,69 @@ class AstrBotDashboard:
             r = jsonify(Response().error("Token 无效").__dict__)
             r.status_code = 401
             return r
+
+    async def _auth_middleware_widget(self):
+        """webchat widget auth"""
+        post_data = await api_package.request_input(
+            [
+                "appid",
+                "data",
+                "noise",
+                "expiry_date",
+                "signature",
+            ]
+        )
+        # 读取apikey
+        appid = post_data.get("appid")
+        if not appid:
+            r = jsonify(Response().error("appid is empty").__dict__)
+            r.status_code = 403
+            return r
+        api_key = await self.db.get_api_key_by_id(str(appid))
+        if not api_key:
+            r = jsonify(Response().error("Invalid API key").__dict__)
+            r.status_code = 401
+            return r
+        # 验证
+        pkg_data = api_package.de_package(
+            api_key.key_hash,
+            post_data.get("data", ""),
+            post_data.get("noise", ""),
+            post_data.get("expiry_date", ""),
+            post_data.get("signature", ""),
+        )
+        if "username" not in pkg_data:
+            r = jsonify(Response().error("username is required").__dict__)
+            r.status_code = 401
+            return r
+        username = "widget." + pkg_data["username"]  # 增加前缀，
+        pkg_data["username"] = username
+        # 设置全局参数
+        g.username = username
+        g.api_package = pkg_data
+        # 权限
+        if isinstance(api_key.scopes, list):
+            scopes = api_key.scopes
+        else:
+            scopes = list(ALL_OPEN_API_SCOPES)
+        if "*" not in scopes and "chat_widget" not in scopes:
+            r = jsonify(Response().error("Insufficient API key scope").__dict__)
+            r.status_code = 403
+            return r
+        return None
+
+    @staticmethod
+    def _extract_dashboard_jwt() -> str | None:
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header.startswith("Bearer "):
+            token = auth_header.removeprefix("Bearer ").strip()
+            if token:
+                return token
+
+        cookie_token = request.cookies.get(DASHBOARD_JWT_COOKIE_NAME, "").strip()
+        if cookie_token:
+            return cookie_token
+        return None
 
     @staticmethod
     def _extract_raw_api_key() -> str | None:
@@ -311,6 +395,7 @@ class AstrBotDashboard:
             "/api/v1/file": "file",
             "/api/v1/im/message": "im",
             "/api/v1/im/bots": "im",
+            "/api/v1/stats/provider": "stats",
         }
         return scope_map.get(path)
 
@@ -361,6 +446,20 @@ class AstrBotDashboard:
             self.config.save_config()
             logger.info("Initialized random JWT secret for dashboard.")
         self._jwt_secret = self.config["dashboard"]["jwt_secret"]
+
+    def _build_dashboard_credentials_display(self) -> str:
+        username = self.config["dashboard"].get("username", "astrbot")
+        generated_password = getattr(self.config, "_generated_dashboard_password", None)
+        if not generated_password:
+            return f"   ➜  Username: {username}\n ✨✨✨\n"
+
+        credentials_display = (
+            f"   ➜  Initial username: {username}\n"
+            f"   ➜  Initial password: {generated_password}\n"
+            "   ➜  Change it after logging in\n ✨✨✨\n"
+        )
+        object.__setattr__(self.config, "_generated_dashboard_password", None)
+        return credentials_display
 
     @staticmethod
     def _resolve_dashboard_ssl_config(
@@ -481,7 +580,7 @@ class AstrBotDashboard:
         parts.append(f"   ➜  Local: {scheme}://localhost:{port}\n")
         for ip in ip_addr:
             parts.append(f"   ➜  Network: {scheme}://{ip}:{port}\n")
-        parts.append("   ➜  Default username/password: astrbot / astrbot\n ✨✨✨\n")
+        parts.append(self._build_dashboard_credentials_display())
         display = "".join(parts)
 
         if not ip_addr:
